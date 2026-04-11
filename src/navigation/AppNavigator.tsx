@@ -7,6 +7,7 @@ import HomeScreen from '../screens/HomeScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import CameraScreen from '../screens/CameraScreen';
 import ProcessingScreen from '../screens/ProcessingScreen';
+import InvoiceConfirmScreen from '../screens/InvoiceConfirmScreen';
 import WebViewScreen from '../screens/WebViewScreen';
 
 const Stack = createStackNavigator<RootStackParamList>();
@@ -41,7 +42,16 @@ export function AppNavigator() {
         <Stack.Screen
           name="Processing"
           component={ProcessingScreen}
-          options={{ title: 'Procesar Ticket' }}
+          options={{
+            title: 'Procesando',
+            headerLeft: () => null, // No back button — flow should complete
+            gestureEnabled: false,
+          }}
+        />
+        <Stack.Screen
+          name="InvoiceConfirm"
+          component={InvoiceConfirmScreen}
+          options={{ title: 'Tu Factura' }}
         />
         <Stack.Screen
           name="WebView"

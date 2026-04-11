@@ -1,139 +1,221 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
-  Image,
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  ActivityIndicator,
-  ScrollView,
   SafeAreaView,
+  Keyboard,
 } from 'react-native';
+import { WebView } from 'react-native-webview';
+import { WebViewMessageEvent } from 'react-native-webview/lib/WebViewTypes';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { RouteProp } from '@react-navigation/native';
-import { RootStackParamList, OcrResult } from '../types';
-import { COLORS, SPACING, SEARCH_URL_TEMPLATE } from '../constants';
+import { AutoFillResult, AutoStep, RootStackParamList } from '../types';
+import { COLORS, MOBILE_UA, SPACING } from '../constants';
 import { useUserData } from '../hooks/useUserData';
 import { performOcr } from '../services/ocrService';
+import { findPortalUrl } from '../services/portalFinderService';
+import { buildFillScript } from '../services/formFillerService';
+import ProgressSteps from '../components/ProgressSteps';
 
 type Props = {
   navigation: StackNavigationProp<RootStackParamList, 'Processing'>;
   route: RouteProp<RootStackParamList, 'Processing'>;
 };
 
+function delay(ms: number) {
+  return new Promise<void>(resolve => setTimeout(resolve, ms));
+}
+
 export default function ProcessingScreen({ navigation, route }: Props) {
   const { photoUri } = route.params;
-  const { gcvApiKey } = useUserData();
+  const { gcvApiKey, fiscalData } = useUserData();
 
-  const [isProcessing, setIsProcessing] = useState(true);
-  const [ocrResult, setOcrResult] = useState<OcrResult | null>(null);
+  const [step, setStep] = useState<AutoStep>('ocr');
   const [businessName, setBusinessName] = useState('');
+  const [needsManualInput, setNeedsManualInput] = useState(false);
+  const [manualInput, setManualInput] = useState('');
+  const [hiddenWebViewUrl, setHiddenWebViewUrl] = useState<string | null>(null);
+  const [portalUrl, setPortalUrl] = useState<string | null>(null);
+
+  const hiddenWebViewRef = useRef<WebView>(null);
+  const fillTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const navigatedRef = useRef(false);
+
+  // Navigate to confirm screen — called from multiple paths, safe to call once
+  const goToConfirm = useCallback(
+    (url: string | null, fillResults: AutoFillResult | null, name: string) => {
+      if (navigatedRef.current) return;
+      navigatedRef.current = true;
+      if (fillTimeoutRef.current) clearTimeout(fillTimeoutRef.current);
+
+      const script = fiscalData ? buildFillScript(fiscalData) : null;
+      navigation.replace('InvoiceConfirm', {
+        businessName: name,
+        photoUri,
+        portalUrl: url,
+        fillResults,
+        fillScript: url && script ? script : null,
+      });
+    },
+    [navigation, photoUri, fiscalData]
+  );
+
+  // Main flow: runs once on mount
+  const runFlow = useCallback(
+    async (nameOverride?: string) => {
+      let name = nameOverride ?? '';
+
+      if (!nameOverride) {
+        // Step 1 — OCR
+        setStep('ocr');
+        const ocrResult = await performOcr(photoUri, gcvApiKey);
+        name = ocrResult.businessName.trim();
+
+        if (!name || ocrResult.confidence === 'manual') {
+          // No OCR result — ask user to type the name
+          setNeedsManualInput(true);
+          return;
+        }
+      }
+
+      setBusinessName(name);
+
+      // Short pause so user sees the step label update
+      await delay(500);
+
+      // Step 2 — Find portal
+      setStep('finding');
+      await delay(700);
+
+      const match = findPortalUrl(name);
+
+      if (!match) {
+        // Not in database — go to confirm without auto-fill
+        setStep('ready');
+        goToConfirm(null, null, name);
+        return;
+      }
+
+      setPortalUrl(match.url);
+
+      // Step 3 — Load portal in hidden WebView and fill
+      setStep('filling');
+      setHiddenWebViewUrl(match.url);
+
+      // Timeout: if WebView or fill script doesn't respond in 12 s, move forward
+      fillTimeoutRef.current = setTimeout(() => {
+        setStep('ready');
+        goToConfirm(match.url, null, name);
+      }, 12000);
+    },
+    [photoUri, gcvApiKey, goToConfirm]
+  );
 
   useEffect(() => {
-    let cancelled = false;
-    setIsProcessing(true);
+    runFlow();
+    return () => {
+      if (fillTimeoutRef.current) clearTimeout(fillTimeoutRef.current);
+    };
+  }, []);
 
-    performOcr(photoUri, gcvApiKey).then(result => {
-      if (cancelled) return;
-      setOcrResult(result);
-      setBusinessName(result.businessName);
-      setIsProcessing(false);
-    });
-
-    return () => { cancelled = true; };
-  }, [photoUri, gcvApiKey]);
-
-  function handleSearch() {
-    const name = businessName.trim();
-    if (!name) return;
-    const searchUrl = SEARCH_URL_TEMPLATE.replace(
-      '{businessName}',
-      encodeURIComponent(name)
-    );
-    navigation.navigate('WebView', { businessName: name, searchUrl });
+  // Called when the hidden WebView finishes loading the portal page
+  function handleHiddenWebViewLoad() {
+    if (step !== 'filling' || !fiscalData) return;
+    const script = buildFillScript(fiscalData);
+    hiddenWebViewRef.current?.injectJavaScript(script);
   }
 
-  const isManual = ocrResult?.confidence === 'manual';
-  const canSearch = businessName.trim().length > 0;
+  // Called when the fill script sends its results
+  function handleHiddenWebViewMessage(event: WebViewMessageEvent) {
+    try {
+      const msg = JSON.parse(event.nativeEvent.data);
+      if (msg.type === 'FILL_RESULT' || msg.type === 'FILL_ERROR') {
+        const results: AutoFillResult | null =
+          msg.type === 'FILL_RESULT' ? msg.results : null;
+        setStep('ready');
+        goToConfirm(portalUrl, results, businessName);
+      }
+    } catch {
+      // Malformed message — ignore, timeout will handle it
+    }
+  }
+
+  // User submitted manual business name
+  function handleManualSubmit() {
+    const name = manualInput.trim();
+    if (!name) return;
+    Keyboard.dismiss();
+    setNeedsManualInput(false);
+    runFlow(name);
+  }
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        {/* Ticket photo */}
-        <Image source={{ uri: photoUri }} style={styles.photo} resizeMode="contain" />
-
-        {isProcessing ? (
-          <View style={styles.processingBox}>
-            <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.processingText}>Analizando ticket...</Text>
-            <Text style={styles.processingSubtext}>
-              Extrayendo información del negocio
+      <View style={styles.content}>
+        {needsManualInput ? (
+          /* ── Manual input state ────────────────────────── */
+          <View style={styles.manualBox}>
+            <Text style={styles.manualTitle}>¿De qué negocio es el ticket?</Text>
+            <Text style={styles.manualHint}>
+              No pudimos leer el ticket automáticamente. Escribe el nombre del negocio
+              y continuaremos desde ahí.
             </Text>
-          </View>
-        ) : (
-          <View style={styles.resultBox}>
-            {isManual && (
-              <View style={styles.warningBanner}>
-                <Text style={styles.warningText}>
-                  ⚠️  Sin API de OCR configurada. Ingresa el nombre del negocio manualmente.
-                </Text>
-                <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
-                  <Text style={styles.warningLink}>Configurar en Mi Perfil →</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {ocrResult && !ocrResult.success && !isManual && (
-              <View style={styles.infoBanner}>
-                <Text style={styles.infoText}>
-                  ℹ️  No se pudo detectar el nombre automáticamente. Ingrésalo manualmente.
-                </Text>
-              </View>
-            )}
-
-            {ocrResult?.success && ocrResult.confidence === 'high' && (
-              <View style={styles.successBanner}>
-                <Text style={styles.successText}>
-                  ✓ Negocio detectado con alta confianza
-                </Text>
-              </View>
-            )}
-
-            <Text style={styles.fieldLabel}>Nombre del Negocio</Text>
             <TextInput
-              style={styles.businessInput}
-              value={businessName}
-              onChangeText={setBusinessName}
+              style={styles.manualInput}
+              value={manualInput}
+              onChangeText={setManualInput}
+              autoFocus
               autoCapitalize="words"
               placeholder="Ej: OXXO, Walmart, Costco..."
               placeholderTextColor={COLORS.textSecondary}
-              returnKeyType="search"
-              onSubmitEditing={handleSearch}
+              returnKeyType="go"
+              onSubmitEditing={handleManualSubmit}
             />
-            <Text style={styles.hint}>
-              ✏️  Puedes editar el nombre si no es correcto
-            </Text>
-
             <TouchableOpacity
-              style={[styles.searchButton, !canSearch && styles.searchButtonDisabled]}
-              onPress={handleSearch}
-              disabled={!canSearch}
+              style={[styles.continueButton, !manualInput.trim() && styles.continueButtonDisabled]}
+              onPress={handleManualSubmit}
+              disabled={!manualInput.trim()}
             >
-              <Text style={styles.searchButtonText}>
-                🔍  Buscar Portal de Facturación
-              </Text>
+              <Text style={styles.continueButtonText}>Continuar →</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.retakeButton}
+              style={styles.retakeLink}
               onPress={() => navigation.navigate('Camera')}
             >
-              <Text style={styles.retakeButtonText}>📷  Tomar Otra Foto</Text>
+              <Text style={styles.retakeLinkText}>📷  Tomar otra foto</Text>
             </TouchableOpacity>
           </View>
+        ) : (
+          /* ── Auto-processing state ─────────────────────── */
+          <View style={styles.autoBox}>
+            <Text style={styles.autoTitle}>Procesando tu ticket</Text>
+            <Text style={styles.autoSubtitle}>
+              Estamos haciendo todo por ti, un momento...
+            </Text>
+            <View style={styles.stepsContainer}>
+              <ProgressSteps currentStep={step} businessName={businessName} />
+            </View>
+          </View>
         )}
-      </ScrollView>
+      </View>
+
+      {/* Hidden WebView — loads the portal page and fills the form in the background */}
+      {hiddenWebViewUrl && (
+        <WebView
+          ref={hiddenWebViewRef}
+          source={{ uri: hiddenWebViewUrl }}
+          style={styles.hiddenWebView}
+          javaScriptEnabled
+          domStorageEnabled
+          userAgent={MOBILE_UA}
+          onLoadEnd={handleHiddenWebViewLoad}
+          onMessage={handleHiddenWebViewMessage}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -144,129 +226,101 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
   },
   content: {
-    padding: SPACING.md,
-    paddingBottom: SPACING.xl,
+    flex: 1,
+    justifyContent: 'center',
+    padding: SPACING.lg,
   },
-  photo: {
-    width: '100%',
-    height: 220,
-    borderRadius: 12,
-    marginBottom: SPACING.lg,
-    backgroundColor: COLORS.border,
-  },
-  processingBox: {
-    alignItems: 'center',
-    padding: SPACING.xl,
+
+  // Auto-processing UI
+  autoBox: {
     backgroundColor: COLORS.surface,
-    borderRadius: 12,
-    gap: SPACING.md,
+    borderRadius: 20,
+    padding: SPACING.xl,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
   },
-  processingText: {
-    fontSize: 18,
-    fontWeight: '600',
+  autoTitle: {
+    fontSize: 22,
+    fontWeight: '700',
     color: COLORS.text,
-  },
-  processingSubtext: {
-    fontSize: 14,
-    color: COLORS.textSecondary,
-  },
-  resultBox: {
-    gap: SPACING.md,
-  },
-  warningBanner: {
-    backgroundColor: COLORS.warningBg,
-    borderLeftWidth: 4,
-    borderLeftColor: COLORS.warning,
-    padding: SPACING.md,
-    borderRadius: 8,
-  },
-  warningText: {
-    color: COLORS.warning,
-    fontSize: 14,
-    fontWeight: '500',
     marginBottom: SPACING.xs,
   },
-  warningLink: {
-    color: COLORS.primary,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  infoBanner: {
-    backgroundColor: '#E3F2FD',
-    borderLeftWidth: 4,
-    borderLeftColor: COLORS.primary,
-    padding: SPACING.md,
-    borderRadius: 8,
-  },
-  infoText: {
-    color: COLORS.primary,
+  autoSubtitle: {
     fontSize: 14,
-  },
-  successBanner: {
-    backgroundColor: '#E8F5E9',
-    borderLeftWidth: 4,
-    borderLeftColor: COLORS.accent,
-    padding: SPACING.md,
-    borderRadius: 8,
-  },
-  successText: {
-    color: COLORS.accent,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  fieldLabel: {
-    fontSize: 13,
-    fontWeight: '600',
     color: COLORS.textSecondary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
+    marginBottom: SPACING.xl,
   },
-  businessInput: {
+  stepsContainer: {
+    paddingLeft: SPACING.sm,
+  },
+
+  // Manual input UI
+  manualBox: {
     backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    padding: SPACING.xl,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 4,
+    gap: SPACING.md,
+  },
+  manualTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  manualHint: {
+    fontSize: 14,
+    color: COLORS.textSecondary,
+    lineHeight: 20,
+  },
+  manualInput: {
+    backgroundColor: COLORS.background,
     borderWidth: 2,
     borderColor: COLORS.primary,
-    borderRadius: 10,
+    borderRadius: 12,
     padding: SPACING.md,
     fontSize: 18,
     color: COLORS.text,
     fontWeight: '600',
   },
-  hint: {
-    fontSize: 12,
-    color: COLORS.textSecondary,
-    marginTop: -SPACING.xs,
-  },
-  searchButton: {
+  continueButton: {
     backgroundColor: COLORS.primary,
     borderRadius: 12,
     padding: SPACING.lg,
     alignItems: 'center',
-    marginTop: SPACING.sm,
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
+    elevation: 2,
   },
-  searchButtonDisabled: {
-    backgroundColor: COLORS.border,
+  continueButtonDisabled: {
+    backgroundColor: COLORS.disabled,
   },
-  searchButtonText: {
+  continueButtonText: {
     color: '#fff',
     fontSize: 17,
     fontWeight: '700',
   },
-  retakeButton: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 12,
-    padding: SPACING.lg,
+  retakeLink: {
     alignItems: 'center',
-    borderWidth: 2,
-    borderColor: COLORS.border,
+    paddingVertical: SPACING.sm,
   },
-  retakeButtonText: {
-    color: COLORS.text,
-    fontSize: 16,
-    fontWeight: '600',
+  retakeLinkText: {
+    color: COLORS.primary,
+    fontSize: 14,
+    fontWeight: '500',
+  },
+
+  // The hidden WebView — must have non-zero dimensions to render in some environments
+  hiddenWebView: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    bottom: 0,
+    left: 0,
   },
 });

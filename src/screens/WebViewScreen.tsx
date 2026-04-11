@@ -6,34 +6,42 @@ import {
   StyleSheet,
   SafeAreaView,
   ActivityIndicator,
-  Platform,
 } from 'react-native';
-import { WebView, WebViewNavigation } from 'react-native-webview';
+import { WebView } from 'react-native-webview';
+import { WebViewNavigation } from 'react-native-webview/lib/WebViewTypes';
 import * as Linking from 'expo-linking';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { RouteProp } from '@react-navigation/native';
 import { RootStackParamList } from '../types';
-import { COLORS, SPACING } from '../constants';
-import { useUserData } from '../hooks/useUserData';
-import FiscalDataPanel from '../components/FiscalDataPanel';
+import { COLORS, MOBILE_UA, SPACING } from '../constants';
 
 type Props = {
   navigation: StackNavigationProp<RootStackParamList, 'WebView'>;
   route: RouteProp<RootStackParamList, 'WebView'>;
 };
 
-const MOBILE_UA =
-  'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
-
 export default function WebViewScreen({ navigation, route }: Props) {
-  const { businessName, searchUrl } = route.params;
-  const { fiscalData } = useUserData();
+  const { businessName, portalUrl, fillScript } = route.params;
   const [isLoading, setIsLoading] = useState(true);
-  const [currentUrl, setCurrentUrl] = useState(searchUrl);
+  const [currentUrl, setCurrentUrl] = useState(portalUrl);
+  const [scriptInjected, setScriptInjected] = useState(false);
   const webviewRef = useRef<WebView>(null);
 
   function onNavigationStateChange(state: WebViewNavigation) {
     setCurrentUrl(state.url);
+    // Re-inject on navigation if user navigates away and back (reset flag)
+    if (!state.loading && state.url !== portalUrl) {
+      setScriptInjected(false);
+    }
+  }
+
+  function handleLoadEnd() {
+    setIsLoading(false);
+    // Inject the fill script once, after the page finishes loading
+    if (fillScript && !scriptInjected) {
+      webviewRef.current?.injectJavaScript(fillScript);
+      setScriptInjected(true);
+    }
   }
 
   function openInBrowser() {
@@ -42,72 +50,51 @@ export default function WebViewScreen({ navigation, route }: Props) {
 
   return (
     <View style={styles.container}>
-      {/* Custom header */}
       <SafeAreaView style={styles.headerSafe}>
         <View style={styles.header}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={() => navigation.goBack()}
-          >
+          <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.goBack()}>
             <Text style={styles.backIcon}>←</Text>
           </TouchableOpacity>
 
-          <View style={styles.titleContainer}>
-            <Text style={styles.title} numberOfLines={1}>
-              {businessName}
-            </Text>
-            <Text style={styles.subtitle} numberOfLines={1}>
-              Portal de Facturación
-            </Text>
+          <View style={styles.titleWrap}>
+            <Text style={styles.title} numberOfLines={1}>{businessName}</Text>
+            <Text style={styles.subtitle} numberOfLines={1}>Portal de Facturación</Text>
           </View>
 
-          {isLoading && (
-            <ActivityIndicator
-              size="small"
-              color="#fff"
-              style={styles.loadingIndicator}
-            />
-          )}
+          {isLoading && <ActivityIndicator size="small" color="#fff" />}
 
-          <TouchableOpacity style={styles.browserButton} onPress={openInBrowser}>
+          <TouchableOpacity style={styles.iconBtn} onPress={openInBrowser}>
             <Text style={styles.browserIcon}>🌐</Text>
           </TouchableOpacity>
         </View>
+
+        {fillScript && (
+          <View style={styles.preFillBanner}>
+            <Text style={styles.preFillText}>
+              ✓ Datos pre-cargados automáticamente
+            </Text>
+          </View>
+        )}
       </SafeAreaView>
 
-      {/* WebView */}
       <WebView
         ref={webviewRef}
-        source={{ uri: searchUrl }}
+        source={{ uri: portalUrl }}
         style={styles.webview}
         userAgent={MOBILE_UA}
         javaScriptEnabled
         domStorageEnabled
-        startInLoadingState
         onLoadStart={() => setIsLoading(true)}
-        onLoadEnd={() => setIsLoading(false)}
+        onLoadEnd={handleLoadEnd}
         onNavigationStateChange={onNavigationStateChange}
+        startInLoadingState
         renderLoading={() => (
-          <View style={styles.webviewLoading}>
+          <View style={styles.loadingView}>
             <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.webviewLoadingText}>Cargando portal...</Text>
+            <Text style={styles.loadingText}>Cargando portal...</Text>
           </View>
         )}
       />
-
-      {/* Fiscal data panel */}
-      {fiscalData ? (
-        <FiscalDataPanel fiscalData={fiscalData} />
-      ) : (
-        <View style={styles.noProfileBanner}>
-          <Text style={styles.noProfileText}>
-            ⚠️  Sin perfil fiscal configurado —{' '}
-          </Text>
-          <TouchableOpacity onPress={() => navigation.navigate('Profile')}>
-            <Text style={styles.noProfileLink}>Configurar ahora</Text>
-          </TouchableOpacity>
-        </View>
-      )}
     </View>
   );
 }
@@ -115,7 +102,7 @@ export default function WebViewScreen({ navigation, route }: Props) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: COLORS.background,
+    backgroundColor: '#000',
   },
   headerSafe: {
     backgroundColor: COLORS.primary,
@@ -123,13 +110,12 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.primary,
     paddingHorizontal: SPACING.sm,
     paddingVertical: SPACING.sm,
     gap: SPACING.sm,
     minHeight: 52,
   },
-  backButton: {
+  iconBtn: {
     width: 40,
     height: 40,
     justifyContent: 'center',
@@ -140,7 +126,10 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
   },
-  titleContainer: {
+  browserIcon: {
+    fontSize: 20,
+  },
+  titleWrap: {
     flex: 1,
   },
   title: {
@@ -152,53 +141,30 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.75)',
     fontSize: 12,
   },
-  loadingIndicator: {
-    marginHorizontal: SPACING.xs,
-  },
-  browserButton: {
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
+  preFillBanner: {
+    backgroundColor: COLORS.accent,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
     alignItems: 'center',
   },
-  browserIcon: {
-    fontSize: 22,
+  preFillText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
   },
   webview: {
     flex: 1,
   },
-  webviewLoading: {
+  loadingView: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    inset: 0,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: COLORS.background,
     gap: SPACING.md,
   },
-  webviewLoadingText: {
+  loadingText: {
     color: COLORS.textSecondary,
     fontSize: 15,
-  },
-  noProfileBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.warningBg,
-    padding: SPACING.md,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.warning,
-  },
-  noProfileText: {
-    color: COLORS.warning,
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  noProfileLink: {
-    color: COLORS.primary,
-    fontSize: 13,
-    fontWeight: '700',
-    textDecorationLine: 'underline',
   },
 });
