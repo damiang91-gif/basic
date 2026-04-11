@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "FacturaFácil",
+    "slug": "facturafacil",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1565C0"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.yourcompany.facturafacil",
+      "infoPlist": {
+        "NSCameraUsageDescription": "FacturaFácil necesita acceso a la cámara para fotografiar tu ticket.",
+        "NSPhotoLibraryUsageDescription": "FacturaFácil necesita acceso a tu galería para seleccionar tickets existentes.",
+        "NSPhotoLibraryAddUsageDescription": "FacturaFácil puede guardar fotos de tickets en tu galería."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1565C0"
+      },
+      "package": "com.yourcompany.facturafacil",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "FacturaFácil necesita acceso a la cámara para fotografiar tu ticket."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "FacturaFácil necesita acceso a tu galería para seleccionar tickets.",
+          "cameraPermission": "FacturaFácil necesita acceso a la cámara."
+        }
+      ]
+    ]
+  }
+}
